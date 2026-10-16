@@ -1,0 +1,13 @@
+requests
+sgp4
+numpy
+pandas
+scipy
+duckdb
+fastapi
+uvicorn
+streamlit
+plotly
+pyspark
+pytest
+python-dotenv
