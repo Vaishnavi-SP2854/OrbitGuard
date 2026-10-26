@@ -1,83 +1,64 @@
-import streamlit as st
+import sys
+from pathlib import Path
+
+import duckdb
 import pandas as pd
 import pydeck as pdk
-import requests
-import json
-import numpy as np
+import streamlit as st
 
-st.set_page_config(
-    page_title="AstraTrack | Space Debris Engine",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config.settings import DB_PATH, RAW_FILE  # noqa: E402
+from src.ingestion.celestrak_ingest import run_ingestion  # noqa: E402
+from src.engine.sgp4_propagator import load_satellites, make_times, propagate, eci_to_latlon_alt  # noqa: E402
 
-st.title("🛰️ AstraTrack: Orbital Space Debris Tracking & Collision Risk Dashboard")
-st.markdown("Real-time distributed orbital tracking and $O(N \log N)$ pairwise conjunction analysis.")
+st.set_page_config(page_title="OrbitGuard | Space Debris Engine", layout="wide")
+st.title("🛰️ OrbitGuard: Orbital Debris Tracking & Collision Risk Dashboard")
+st.markdown(r"Orbital tracking with SGP4 and $O(N \log N)$ KD-tree conjunction screening.")
 
-# Sidebar Configuration
-st.sidebar.header("Controls & Filters")
-safety_threshold = st.sidebar.slider("Safety Sphere Threshold (km)", 10, 200, 100)
-fetch_live = st.sidebar.button("Fetch Live CelesTrak Data")
+st.sidebar.header("Controls")
+if st.sidebar.button("Re-download CelesTrak data"):
+    run_ingestion(force=True)
+    st.cache_data.clear()
 
-# Fetch and Process Data
+
 @st.cache_data(ttl=3600)
-def load_celestrak_data():
-    url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json"
-    res = requests.get(url)
-    if res.status_code == 200:
-        return pd.DataFrame(res.json())
-    return pd.DataFrame()
+def load_positions():
+    path = str(RAW_FILE) if Path(RAW_FILE).exists() else run_ingestion()
+    if not path:
+        return pd.DataFrame()
+    sats, meta = load_satellites(path)
+    states = propagate(sats, meta, make_times(hours=0, step_minutes=1)[:1])
+    df = next(iter(states.values()))
+    df = df[df["error_code"] == 0].copy()
+    df["lat"], df["lon"], df["alt_km"] = eci_to_latlon_alt(df)
+    return df
 
-df_raw = load_celestrak_data()
 
-if not df_raw.empty:
-    st.sidebar.success(f"Loaded {len(df_raw)} Space Objects")
-    
-    # Calculate simple 3D rendering position for demo visualization
-    # Convert inclination/mean_motion to spherical latitude/longitude representation
-    df_raw["lat"] = np.sin(df_raw["INCLINATION"]) * 80
-    df_raw["lon"] = (df_raw["RA_OF_ASC_NODE"] % 360) - 180
-    df_raw["elevation"] = (df_raw["MEAN_MOTION"] * 50000).clip(200000, 1000000)
+df = load_positions()
+if df.empty:
+    st.error("No orbital data. Run `python -m src.ingestion.celestrak_ingest` first (needs internet).")
+    st.stop()
 
-    # Main Metrics Display
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Tracked Objects", len(df_raw))
-    col2.metric("Monitored Orbits", "LEO / GEO")
-    col3.metric("System Health", "Operational")
+c1, c2 = st.columns(2)
+c1.metric("Tracked objects", len(df))
+c2.metric("Mean altitude (km)", f"{df['alt_km'].mean():.0f}")
 
-    # 3D PyDeck Globe Rendering
-    st.subheader("Interactive 3D Orbital Trajectory Map")
-    
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=df_raw,
-        get_position=["lon", "lat", "elevation"],
-        get_color="[255, 75, 75, 180]",
-        get_radius=80000,
-        pickable=True
-    )
-    
-    view_state = pdk.ViewState(
-        latitude=20.0,
-        longitude=0.0,
-        zoom=1.2,
-        pitch=30
-    )
+st.subheader("Current satellite positions")
+layer = pdk.Layer("ScatterplotLayer", data=df, get_position=["lon", "lat"],
+                  get_fill_color=[255, 75, 75, 180], get_radius=60000, pickable=True)
+st.pydeck_chart(pdk.Deck(
+    map_style=None,  # a "mapbox://" style needs an API token and shows blank without one
+    initial_view_state=pdk.ViewState(latitude=20, longitude=0, zoom=1, pitch=0),
+    layers=[layer], tooltip={"text": "{name}\nNORAD {norad_id}\nAlt {alt_km} km"}))
 
-    st.pydeck_chart(pdk.Deck(
-        map_style="mapbox://styles/mapbox/dark-v10",
-        initial_view_state=view_state,
-        layers=[layer],
-        tooltip={"text": "Name: {OBJECT_NAME}\nNORAD ID: {NORAD_CAT_ID}\nInclination: {INCLINATION}°"}
-    ))
-
-    # Conjunction Alerts Table
-    st.subheader("Recent Conjunction Risks")
-    st.dataframe(
-        df_raw[["OBJECT_NAME", "NORAD_CAT_ID", "INCLINATION", "ECCENTRICITY", "MEAN_MOTION"]].head(10),
-        use_container_width=True
-    )
+st.subheader("Conjunction alerts (from pipeline)")
+if Path(DB_PATH).exists():
+    try:
+        conn = duckdb.connect(str(DB_PATH), read_only=True)
+        alerts = conn.execute("SELECT * FROM conjunction_alerts ORDER BY distance_km LIMIT 100").fetchdf()
+        conn.close()
+        st.dataframe(alerts, use_container_width=True)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Could not read alerts (is the pipeline still running?): {e}")
 else:
-    st.error("Failed to connect to space data feeds.")
-
-    
+    st.info("No alerts yet. Run `python -m src.run_pipeline`.")

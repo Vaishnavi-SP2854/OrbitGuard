@@ -12,7 +12,8 @@ from config.settings import DB_PATH, SAFETY_DISTANCE_KM, CRITICAL_DISTANCE_KM  #
 
 
 class CollisionRiskEngine:
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, threshold_km=None):
+        self.threshold_km = float(threshold_km if threshold_km is not None else SAFETY_DISTANCE_KM)
         self.db_path = str(db_path or DB_PATH)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
@@ -33,7 +34,7 @@ class CollisionRiskEngine:
         if len(valid) < 2:
             return 0
         coords = valid[["x", "y", "z"]].to_numpy()
-        pairs = np.array(sorted(KDTree(coords).query_pairs(r=SAFETY_DISTANCE_KM)))
+        pairs = np.array(sorted(KDTree(coords).query_pairs(r=self.threshold_km)))
         if pairs.size == 0:
             return 0
         i, j = pairs[:, 0], pairs[:, 1]
@@ -53,6 +54,11 @@ class CollisionRiskEngine:
         self.conn.execute("INSERT OR REPLACE INTO conjunction_alerts SELECT * FROM df_temp")
         self.conn.unregister("df_temp")
         return len(df)
+
+    def counts_by_level(self) -> dict:
+        rows = self.conn.execute(
+            "SELECT risk_level, COUNT(*) FROM conjunction_alerts GROUP BY risk_level").fetchall()
+        return {k: v for k, v in rows}
 
     def close(self):
         # DuckDB allows only ONE writer process; close so the API/dashboard can open the file.
