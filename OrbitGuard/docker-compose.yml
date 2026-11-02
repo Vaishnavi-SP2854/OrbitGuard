@@ -1,19 +1,26 @@
 services:
   pipeline:
-    build: .
+    build:
+        context: .
+        dockerfile: Dockerfile
+    image: orbitguard:latest
     command: python -m src.run_pipeline --hours 24 --step 10
     volumes: [ "./data:/app/data" ]
 
   api:
-    build: .
+    image: orbitguard:latest
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
     ports: [ "8000:8000" ]
     volumes: [ "./data:/app/data" ]
-    depends_on: [ pipeline ]
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
 
   dashboard:
-    build: .
+    image: orbitguard:latest
     command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
     ports: [ "8501:8501" ]
     volumes: [ "./data:/app/data" ]
-    depends_on: [ pipeline ]
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully

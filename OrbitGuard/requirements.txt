@@ -1,4 +1,6 @@
-pyspark>=3.5.0
+# pyspark is not used anywhere
+#pyspark>=3.5.0
+
 sgp4>=2.23
 requests>=2.31.0
 fastapi>=0.110.0
@@ -8,3 +10,8 @@ pydeck>=0.8.0
 duckdb>=0.10.0
 pandas>=2.2.0
 pydantic>=2.6.0
+numpy
+scipy
+plotly
+pytest
+python-dotenv
